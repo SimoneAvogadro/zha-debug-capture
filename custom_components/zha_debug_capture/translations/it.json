@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configura ZHA Debug Capture",
+        "description": "Clicca Invia per abilitare ZHA Debug Capture. L'integrazione registra una voce nella sidebar e un insieme di servizi per catturare il traffico Zigbee filtrato per device, con buffer in RAM per ridurre il wear della SD card."
+      }
+    },
+    "abort": {
+      "already_configured": "ZHA Debug Capture è già configurato."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opzioni ZHA Debug Capture",
+        "description": "Abilita o disabilita la voce in sidebar. Riavvia Home Assistant (o ricarica l'integrazione) perché la modifica abbia effetto.",
+        "data": {
+          "show_in_sidebar": "Mostra in sidebar"
+        }
+      }
+    }
+  }
+}

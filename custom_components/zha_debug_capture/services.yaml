@@ -1,0 +1,58 @@
+start:
+  name: Avvia cattura ZHA
+  description: >-
+    Cattura tutti i messaggi Zigbee in/out dei device selezionati. I record
+    vengono filtrati per IEEE/NWK e bufferizzati in RAM; vengono scritti su
+    disco solo periodicamente (default ogni 4h), allo stop sessione, oppure
+    allo shutdown di Home Assistant. Utile per ridurre il wear della SD card.
+  fields:
+    devices:
+      name: Device ZHA
+      description: Device da loggare. Multi-selezione.
+      required: true
+      selector:
+        device:
+          integration: zha
+          multiple: true
+    end_time:
+      name: Orario di fine
+      description: La cattura si interrompe automaticamente a quest'ora (max +24h).
+      required: true
+      selector:
+        datetime:
+    flush_interval_minutes:
+      name: Intervallo flush
+      description: Frequenza di scrittura del buffer su disco, in minuti.
+      required: false
+      default: 240
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+          mode: box
+    replace_existing:
+      name: Sostituisci sessione attiva
+      description: Se vero e una sessione è già attiva, viene fermata prima di partire con la nuova.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+stop:
+  name: Ferma cattura ZHA
+  description: >-
+    Ferma la sessione di cattura attiva, esegue un flush finale del buffer
+    su disco, ripristina i livelli di logging originali.
+
+status:
+  name: Stato cattura ZHA
+  description: >-
+    Restituisce lo stato corrente della sessione di cattura (attiva o no,
+    device, scadenza, byte bufferizzati, file path).
+
+list_captures:
+  name: Lista capture salvate
+  description: >-
+    Restituisce l'elenco dei file di cattura presenti in /config/zha_debug_capture/captures/
+    con dimensione e data di creazione.

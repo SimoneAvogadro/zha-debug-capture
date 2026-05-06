@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up ZHA Debug Capture",
+        "description": "Click Submit to enable ZHA Debug Capture. The integration registers a sidebar panel and a set of services to capture filtered Zigbee traffic for selected ZHA devices, with an in-memory buffer to reduce SD-card wear."
+      }
+    },
+    "abort": {
+      "already_configured": "ZHA Debug Capture is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ZHA Debug Capture options",
+        "description": "Toggle the sidebar entry. Restart Home Assistant (or reload the integration) for the change to take effect.",
+        "data": {
+          "show_in_sidebar": "Show in sidebar"
+        }
+      }
+    }
+  },
+  "services": {
+    "start": {
+      "name": "Start ZHA capture",
+      "description": "Capture all Zigbee in/out messages of the selected devices. Buffered in RAM, written to disk periodically or on stop."
+    },
+    "stop": {
+      "name": "Stop ZHA capture",
+      "description": "Stop the active capture session, perform a final flush, restore original logger levels."
+    },
+    "status": {
+      "name": "ZHA capture status",
+      "description": "Return the current session state."
+    },
+    "list_captures": {
+      "name": "List saved captures",
+      "description": "Return the list of saved capture files."
+    }
+  }
+}
