@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "zha_debug_capture"
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 
 URL_BASE = f"/{DOMAIN}"
 PANEL_URL_PATH = DOMAIN.replace("_", "-")
@@ -14,11 +14,19 @@ SERVICE_START = "start"
 SERVICE_STOP = "stop"
 SERVICE_STATUS = "status"
 SERVICE_LIST_CAPTURES = "list_captures"
+SERVICE_TAIL = "tail"
+SERVICE_DELETE_CAPTURE = "delete_capture"
 
 ATTR_DEVICES = "devices"
 ATTR_END_TIME = "end_time"
 ATTR_FLUSH_INTERVAL_MINUTES = "flush_interval_minutes"
 ATTR_REPLACE_EXISTING = "replace_existing"
+ATTR_LINES = "lines"
+ATTR_FILENAME = "filename"
+
+DEFAULT_TAIL_LINES = 200
+MAX_TAIL_LINES = 2000
+TAIL_FILE_BYTES = 256 * 1024
 
 EVENT_SESSION_CHANGED = f"{DOMAIN}_session_changed"
 
@@ -27,7 +35,7 @@ DEFAULT_SHOW_IN_SIDEBAR = True
 
 DEFAULT_FLUSH_INTERVAL_MINUTES = 240
 MIN_DURATION_SECONDS = 60
-MAX_DURATION_SECONDS = 86400
+MAX_DURATION_SECONDS = 7 * 86400
 
 DEFAULT_BUFFER_MAX_BYTES = 50 * 1024 * 1024
 

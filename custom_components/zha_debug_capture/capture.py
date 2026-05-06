@@ -33,12 +33,14 @@ from .const import (
     CAPTURE_LOGGERS,
     DEFAULT_BUFFER_MAX_BYTES,
     DEFAULT_FLUSH_INTERVAL_MINUTES,
+    DEFAULT_TAIL_LINES,
     DOMAIN,
     EVENT_SESSION_CHANGED,
     LOG_FORMAT,
     MAX_DURATION_SECONDS,
     MIN_DURATION_SECONDS,
     NOTIFICATION_ID,
+    TAIL_FILE_BYTES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -114,6 +116,13 @@ class MemoryBufferHandler(logging.Handler):
     def buffered_bytes(self) -> int:
         with self._lock:
             return self.size
+
+    def tail_lines(self, n: int) -> list[str]:
+        """Snapshot the last n in-memory lines, stripped of trailing newline."""
+        with self._lock:
+            if not self.buffer:
+                return []
+            return [s.rstrip("\n") for s in self.buffer[-n:]]
 
     def _flush_locked(self) -> None:
         if not self.buffer:
@@ -439,6 +448,78 @@ def session_status(hass: HomeAssistant) -> dict[str, Any]:
         "file_path": str(session.file_path),
         "flush_interval_minutes": session.flush_interval_minutes,
     }
+
+
+def _tail_session_sync(hass: HomeAssistant, n: int) -> dict[str, Any]:
+    """Synchronously gather a tail of the active capture (file + buffer).
+
+    Reads at most TAIL_FILE_BYTES from the end of the on-disk file (skipping
+    the possibly-partial first line) and concatenates them with the in-memory
+    buffer. The combined list is then trimmed to n lines.
+    """
+    domain_data = hass.data.get(DOMAIN, {})
+    session: ZhaCaptureSession | None = domain_data.get("session")
+    if session is None:
+        return {"active": False, "lines": []}
+
+    file_lines: list[str] = []
+    if session.file_path.exists():
+        try:
+            with session.file_path.open("rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                read_from = max(0, size - TAIL_FILE_BYTES)
+                fh.seek(read_from)
+                content = fh.read().decode("utf-8", errors="replace")
+            lines = content.splitlines()
+            if read_from > 0 and lines:
+                # First line may be truncated by the seek; drop it.
+                lines = lines[1:]
+            file_lines = lines
+        except OSError as err:
+            _LOGGER.debug("Tail file read failed: %s", err)
+
+    buffer_lines = session.handler.tail_lines(n)
+    combined = (file_lines + buffer_lines)[-n:]
+    return {
+        "active": True,
+        "lines": combined,
+        "buffered_bytes": session.handler.buffered_bytes,
+        "expires_at": session.expires_at.isoformat(),
+        "file_path": str(session.file_path),
+    }
+
+
+async def tail_session(
+    hass: HomeAssistant, n: int = DEFAULT_TAIL_LINES
+) -> dict[str, Any]:
+    """Return a JSON-serialisable tail of the active session."""
+    return await hass.async_add_executor_job(_tail_session_sync, hass, n)
+
+
+async def delete_capture_file(hass: HomeAssistant, filename: str) -> None:
+    """Delete a saved capture file by name. Validates against path traversal,
+    refuses to delete the file of the active session.
+    """
+    capture_dir = (Path(hass.config.path(DOMAIN)) / CAPTURE_DIR_NAME).resolve()
+    target_name = Path(filename).name
+    if not target_name.startswith("zha_") or not target_name.endswith(".log"):
+        raise ValueError(f"Invalid capture filename: {filename}")
+    target = (capture_dir / target_name).resolve()
+    if not target.is_relative_to(capture_dir):
+        raise ValueError(f"Invalid capture filename: {filename}")
+    if not target.exists():
+        raise ValueError(f"Capture file not found: {target_name}")
+
+    domain_data = hass.data.get(DOMAIN, {})
+    session: ZhaCaptureSession | None = domain_data.get("session")
+    if session is not None and session.file_path.resolve() == target:
+        raise ValueError(
+            "Cannot delete the file of the active capture — stop the session first"
+        )
+
+    await hass.async_add_executor_job(target.unlink)
+    _LOGGER.info("Deleted capture file: %s", target)
 
 
 def list_capture_files(hass: HomeAssistant) -> list[dict[str, Any]]:

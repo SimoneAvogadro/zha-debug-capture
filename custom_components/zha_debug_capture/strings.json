@@ -37,6 +37,14 @@
     "list_captures": {
       "name": "List saved captures",
       "description": "Return the list of saved capture files."
+    },
+    "tail": {
+      "name": "Tail active capture",
+      "description": "Return the last N lines of the active capture (file on disk + in-RAM buffer)."
+    },
+    "delete_capture": {
+      "name": "Delete capture file",
+      "description": "Delete a saved capture file. The active session's file cannot be deleted."
     }
   }
 }

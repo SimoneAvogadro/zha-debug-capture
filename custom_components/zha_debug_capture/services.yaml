@@ -15,8 +15,8 @@ start:
           integration: zha
           multiple: true
     end_time:
-      name: Orario di fine
-      description: La cattura si interrompe automaticamente a quest'ora (max +24h).
+      name: Fine cattura
+      description: La cattura si interrompe automaticamente a questo istante (max +7 giorni).
       required: true
       selector:
         datetime:
@@ -56,3 +56,34 @@ list_captures:
   description: >-
     Restituisce l'elenco dei file di cattura presenti in /config/zha_debug_capture/captures/
     con dimensione e data di creazione.
+
+tail:
+  name: Tail della cattura attiva
+  description: >-
+    Restituisce le ultime N righe della cattura attiva (file su disco + buffer
+    in RAM). Utile per vedere in tempo reale i messaggi che stanno arrivando.
+  fields:
+    lines:
+      name: Numero di righe
+      description: Quante righe restituire (max 2000).
+      required: false
+      default: 200
+      selector:
+        number:
+          min: 1
+          max: 2000
+          mode: box
+
+delete_capture:
+  name: Elimina file di cattura
+  description: >-
+    Cancella un file salvato dalla cartella captures. Non è possibile cancellare
+    il file di una sessione ancora attiva.
+  fields:
+    filename:
+      name: Nome file
+      description: Nome del file (es. "zha_20260506_172944.log").
+      required: true
+      example: zha_20260506_172944.log
+      selector:
+        text:

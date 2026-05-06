@@ -26,18 +26,21 @@ const I18N = {
     deviceLoading: "Caricamento device ZHA…",
     deviceNoZha: "Nessun device ZHA trovato. Verifica che l'integrazione ZHA sia attiva.",
     formHeading: "Avvia nuova cattura",
-    formEndTime: "Orario di fine",
-    formEndTimeHelpToday: "oggi",
-    formEndTimeHelpTomorrow: "domani",
+    formEndTime: "Fine cattura",
     formFlushInterval: "Flush ogni (minuti)",
     formReplaceExisting: "Sostituisci sessione attiva",
     formStart: "Avvia cattura",
     capturesHeading: "Capture salvate",
     capturesEmpty: "Nessun file salvato.",
     capturesDownload: "Scarica",
+    captureDelete: "Elimina file",
+    confirmDelete: "Eliminare definitivamente {file}?",
+    tailHeading: "Live tail",
+    tailEmpty: "In attesa del primo messaggio dei device selezionati…",
+    tailPaused: "(in pausa: scheda non in primo piano)",
     errorNoDevices: "Seleziona almeno un device.",
-    errorNoEndTime: "Imposta un orario di fine.",
-    errorEndTimeTooFar: "L'orario di fine non può essere oltre 24h da adesso.",
+    errorNoEndTime: "Imposta un orario di fine valido nel futuro.",
+    errorEndTimeTooFar: "La fine cattura non può essere oltre 7 giorni da adesso.",
     confirmStop: "Fermare la sessione di cattura attiva?",
   },
   en: {
@@ -58,18 +61,21 @@ const I18N = {
     deviceLoading: "Loading ZHA devices…",
     deviceNoZha: "No ZHA devices found. Make sure the ZHA integration is set up.",
     formHeading: "Start new capture",
-    formEndTime: "End time",
-    formEndTimeHelpToday: "today",
-    formEndTimeHelpTomorrow: "tomorrow",
+    formEndTime: "Capture end",
     formFlushInterval: "Flush every (min)",
     formReplaceExisting: "Replace active session",
     formStart: "Start capture",
     capturesHeading: "Saved captures",
     capturesEmpty: "No files saved.",
     capturesDownload: "Download",
+    captureDelete: "Delete file",
+    confirmDelete: "Permanently delete {file}?",
+    tailHeading: "Live tail",
+    tailEmpty: "Waiting for the first message from the selected devices…",
+    tailPaused: "(paused: tab not in foreground)",
     errorNoDevices: "Select at least one device.",
-    errorNoEndTime: "Set an end time.",
-    errorEndTimeTooFar: "End time can't be more than 24h from now.",
+    errorNoEndTime: "Set a valid end time in the future.",
+    errorEndTimeTooFar: "Capture end can't be more than 7 days from now.",
     confirmStop: "Stop the active capture session?",
   },
 };
@@ -113,31 +119,30 @@ function defaultEndTime() {
   return ceilToFiveMinutes(now);
 }
 
-function parseTimeInput(value) {
-  // value: "HH:MM" string. Returns Date today-at-HH:MM, or tomorrow if past.
-  if (!value || !/^\d{1,2}:\d{2}$/.test(value)) return null;
-  const [h, m] = value.split(":").map((x) => parseInt(x, 10));
-  const now = new Date();
-  const target = new Date(now.getTime());
-  target.setHours(h, m, 0, 0);
-  if (target.getTime() <= now.getTime() + 30000) {
-    // If past or within 30s, assume tomorrow.
-    target.setDate(target.getDate() + 1);
-  }
-  return target;
+function parseDateTimeInput(value) {
+  // value: "YYYY-MM-DDTHH:MM" from <input type="datetime-local"> (local time).
+  if (!value) return null;
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return null;
+  return d;
 }
 
-function timeInputValue(date) {
-  const h = String(date.getHours()).padStart(2, "0");
-  const m = String(date.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function isTomorrow(date) {
-  const today = new Date();
-  return date.getDate() !== today.getDate()
-    || date.getMonth() !== today.getMonth()
-    || date.getFullYear() !== today.getFullYear();
+function dateTimeInputValue(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const y = date.getFullYear();
+  const mo = pad(date.getMonth() + 1);
+  const da = pad(date.getDate());
+  const h = pad(date.getHours());
+  const m = pad(date.getMinutes());
+  return `${y}-${mo}-${da}T${h}:${m}`;
 }
 
 class ZhaDebugCapturePanel extends HTMLElement {
@@ -163,6 +168,11 @@ class ZhaDebugCapturePanel extends HTMLElement {
     this._busy = false;
     this._error = "";
     this._statusTimer = null;
+    this._tail = { lines: [] };
+    this._tailTimer = null;
+    this._tailFetching = false;
+    this._tailVisibilityHandler = null;
+    this._tailPaused = false;
   }
 
   set hass(value) {
@@ -199,6 +209,7 @@ class ZhaDebugCapturePanel extends HTMLElement {
       clearInterval(this._statusTimer);
       this._statusTimer = null;
     }
+    this._stopTailLoop();
   }
 
   async _initialize() {
@@ -208,6 +219,7 @@ class ZhaDebugCapturePanel extends HTMLElement {
     this._subscribeEvents();
     this._startStatusTicker();
     this._render();
+    this._syncTailLoop();
   }
 
   async _loadDevices() {
@@ -300,6 +312,7 @@ class ZhaDebugCapturePanel extends HTMLElement {
     await this._refreshSession();
     await this._refreshCaptures();
     this._render();
+    this._syncTailLoop();
   }
 
   _startStatusTicker() {
@@ -308,6 +321,102 @@ class ZhaDebugCapturePanel extends HTMLElement {
     this._statusTimer = setInterval(() => {
       if (this._session && this._session.active) this._render();
     }, 30000);
+  }
+
+  _syncTailLoop() {
+    const isActive = this._session && this._session.active;
+    if (isActive) this._startTailLoop();
+    else this._stopTailLoop();
+  }
+
+  _startTailLoop() {
+    if (this._tailVisibilityHandler) return; // already running
+    this._tailVisibilityHandler = () => {
+      if (document.visibilityState === "visible") {
+        this._tailPaused = false;
+        this._tickTail();
+        if (!this._tailTimer) {
+          this._tailTimer = setInterval(() => this._tickTail(), 4000);
+        }
+      } else if (this._tailTimer) {
+        clearInterval(this._tailTimer);
+        this._tailTimer = null;
+        this._tailPaused = true;
+        this._renderTailPausedHint();
+      }
+    };
+    document.addEventListener("visibilitychange", this._tailVisibilityHandler);
+    if (document.visibilityState === "visible") {
+      this._tickTail();
+      this._tailTimer = setInterval(() => this._tickTail(), 4000);
+    } else {
+      this._tailPaused = true;
+    }
+  }
+
+  _stopTailLoop() {
+    if (this._tailTimer) {
+      clearInterval(this._tailTimer);
+      this._tailTimer = null;
+    }
+    if (this._tailVisibilityHandler) {
+      document.removeEventListener("visibilitychange", this._tailVisibilityHandler);
+      this._tailVisibilityHandler = null;
+    }
+    this._tailPaused = false;
+    this._tail = { lines: [] };
+  }
+
+  async _tickTail() {
+    if (this._tailFetching || !this._hass) return;
+    this._tailFetching = true;
+    try {
+      const resp = await this._hass.callService(
+        DOMAIN, "tail", { lines: 200 }, undefined, false, true,
+      );
+      const data = resp && resp.response ? resp.response : resp;
+      if (data && data.active) {
+        this._tail = { lines: data.lines || [] };
+        if (this._session) this._session.buffered_bytes = data.buffered_bytes;
+        this._renderTailInPlace();
+      } else {
+        // Session ended underneath us — stop the loop, let the event handler
+        // refresh the rest of the UI.
+        this._stopTailLoop();
+      }
+    } catch (e) {
+      // Transient errors: ignore, retry on the next tick.
+    } finally {
+      this._tailFetching = false;
+    }
+  }
+
+  _renderTailInPlace() {
+    const box = this.shadowRoot.querySelector(".tail-box");
+    if (!box) return;
+    const lines = this._tail.lines || [];
+    if (lines.length === 0) {
+      box.classList.add("empty");
+      box.textContent = this._t.tailEmpty;
+      return;
+    }
+    const wasNearBottom =
+      box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    box.classList.remove("empty");
+    box.textContent = lines.join("\n");
+    if (wasNearBottom) box.scrollTop = box.scrollHeight;
+    // Keep the buffer-size indicator in the session card fresh too.
+    const bufEl = this.shadowRoot.querySelector(".session-buffer");
+    if (bufEl && this._session) {
+      bufEl.textContent = fmtBytes(this._session.buffered_bytes || 0);
+    }
+    this._renderTailPausedHint();
+  }
+
+  _renderTailPausedHint() {
+    const hint = this.shadowRoot.querySelector(".tail-paused-hint");
+    if (!hint) return;
+    hint.textContent = this._tailPaused ? this._t.tailPaused : "";
   }
 
   async _onStartClick() {
@@ -324,8 +433,13 @@ class ZhaDebugCapturePanel extends HTMLElement {
     }
     const now = new Date();
     const diffMs = this._endTime.getTime() - now.getTime();
-    if (diffMs > 24 * 3600 * 1000) {
+    if (diffMs > 7 * 24 * 3600 * 1000) {
       this._error = this._t.errorEndTimeTooFar;
+      this._render();
+      return;
+    }
+    if (diffMs <= 0) {
+      this._error = this._t.errorNoEndTime;
       this._render();
       return;
     }
@@ -340,6 +454,24 @@ class ZhaDebugCapturePanel extends HTMLElement {
       });
       // Event will trigger a refresh, but force one now too.
       await this._refreshSession();
+    } catch (err) {
+      this._error = String(err && err.message ? err.message : err);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _onDeleteCapture(filename) {
+    if (!filename) return;
+    const msg = this._t.confirmDelete.replace("{file}", filename);
+    if (!confirm(msg)) return;
+    this._busy = true;
+    this._error = "";
+    this._render();
+    try {
+      await this._hass.callService(DOMAIN, "delete_capture", { filename });
+      await this._refreshCaptures();
     } catch (err) {
       this._error = String(err && err.message ? err.message : err);
     } finally {
@@ -373,7 +505,13 @@ class ZhaDebugCapturePanel extends HTMLElement {
   _onDeviceToggle(deviceId, checked) {
     if (checked) this._selected.add(deviceId);
     else this._selected.delete(deviceId);
-    this._render();
+    // Avoid full re-render: it would reset the device-list scroll position
+    // mid-selection. The browser already handled the visual checkbox state;
+    // we only need to refresh the counter.
+    const counter = this.shadowRoot.querySelector(".selected-count");
+    if (counter) {
+      counter.textContent = `${this._t.deviceSelected}: ${this._selected.size}`;
+    }
   }
 
   _onFilterInput(value) {
@@ -382,9 +520,9 @@ class ZhaDebugCapturePanel extends HTMLElement {
   }
 
   _onTimeChange(value) {
-    const parsed = parseTimeInput(value);
+    const parsed = parseDateTimeInput(value);
     if (parsed) this._endTime = parsed;
-    this._render();
+    // No re-render: rebuilding the form steals focus from the picker mid-edit.
   }
 
   _onFlushChange(value) {
@@ -428,7 +566,7 @@ class ZhaDebugCapturePanel extends HTMLElement {
         <div class="status">${t.sessionActive} — ${t.sessionExpiresAt} ${fmtTime(expires)} (${minutesLeft} min)</div>
         <div class="meta"><span class="label">${t.sessionStartedAt}</span> ${fmtTime(started)}</div>
         <div class="meta"><span class="label">${t.sessionDevices}</span> ${devices || "?"}</div>
-        <div class="meta"><span class="label">${t.sessionBuffer}</span> ${fmtBytes(this._session.buffered_bytes || 0)}</div>
+        <div class="meta"><span class="label">${t.sessionBuffer}</span> <span class="session-buffer">${fmtBytes(this._session.buffered_bytes || 0)}</span></div>
         <div class="meta"><span class="label">${t.sessionFile}</span> <code>${filename || "?"}</code></div>
         <div class="actions">
           <button id="stop-btn" ${this._busy ? "disabled" : ""}>${t.sessionStop}</button>
@@ -464,6 +602,23 @@ class ZhaDebugCapturePanel extends HTMLElement {
     }).join("");
   }
 
+  _renderTail() {
+    const t = this._t;
+    const lines = (this._tail && this._tail.lines) || [];
+    const isEmpty = lines.length === 0;
+    const content = isEmpty
+      ? escapeHtml(t.tailEmpty)
+      : escapeHtml(lines.join("\n"));
+    const cls = isEmpty ? "tail-box empty" : "tail-box";
+    const hint = this._tailPaused ? escapeHtml(t.tailPaused) : "";
+    return `
+      <div class="tail-card">
+        <h2>${t.tailHeading} <span class="tail-paused-hint">${hint}</span></h2>
+        <pre class="${cls}">${content}</pre>
+      </div>
+    `;
+  }
+
   _renderCaptures() {
     const t = this._t;
     if (this._captures.length === 0) {
@@ -472,12 +627,21 @@ class ZhaDebugCapturePanel extends HTMLElement {
     return this._captures.map((c) => {
       const url = `/${DOMAIN}/captures/${encodeURIComponent(c.filename)}`;
       const when = new Date(c.modified).toLocaleString();
+      const safeName = escapeHtml(c.filename);
       return `
         <div class="capture">
           <a href="${url}" download class="capture-link">
-            <code>${c.filename}</code>
+            <code>${safeName}</code>
           </a>
-          <span class="capture-meta">${fmtBytes(c.size_bytes)} · ${when}</span>
+          <span class="capture-right">
+            <span class="capture-meta">${fmtBytes(c.size_bytes)} · ${when}</span>
+            <button
+              class="capture-delete"
+              data-filename="${safeName}"
+              title="${escapeHtml(t.captureDelete)}"
+              aria-label="${escapeHtml(t.captureDelete)}"
+            >✕</button>
+          </span>
         </div>
       `;
     }).join("");
@@ -485,9 +649,10 @@ class ZhaDebugCapturePanel extends HTMLElement {
 
   _render() {
     const t = this._t;
-    const tomorrow = isTomorrow(this._endTime);
-    const helpText = tomorrow ? t.formEndTimeHelpTomorrow : t.formEndTimeHelpToday;
     const isActive = this._session && this._session.active;
+    // Preserve the device-list scroll position across renders triggered by
+    // session/status updates, filter changes, etc.
+    const prevScroll = this.shadowRoot.querySelector(".device-list")?.scrollTop ?? 0;
     const errorBanner = this._error
       ? `<div class="error-banner">${this._error}</div>`
       : "";
@@ -588,6 +753,7 @@ class ZhaDebugCapturePanel extends HTMLElement {
           min-width: 120px;
         }
         .form input[type="time"],
+        .form input[type="datetime-local"],
         .form input[type="number"] {
           background: var(--secondary-background-color, #f4f4f4);
           color: var(--primary-text-color);
@@ -613,7 +779,8 @@ class ZhaDebugCapturePanel extends HTMLElement {
           box-sizing: border-box;
         }
         .device-list {
-          max-height: 60vh;
+          max-height: calc(100vh - 220px);
+          min-height: 240px;
           overflow-y: auto;
           margin: 0 -8px;
         }
@@ -700,6 +867,7 @@ class ZhaDebugCapturePanel extends HTMLElement {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 8px;
           padding: 6px 0;
           font-size: 13px;
         }
@@ -712,10 +880,72 @@ class ZhaDebugCapturePanel extends HTMLElement {
         .capture-link {
           color: var(--primary-color);
           text-decoration: none;
+          flex: 1;
+          min-width: 0;
+        }
+        .capture-right {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-shrink: 0;
         }
         .capture-meta {
           color: var(--secondary-text-color);
           font-size: 12px;
+        }
+        .capture-delete {
+          background: transparent;
+          border: 1px solid transparent;
+          color: var(--secondary-text-color);
+          padding: 2px 8px;
+          font-size: 13px;
+          line-height: 1;
+          cursor: pointer;
+          border-radius: 4px;
+        }
+        .capture-delete:hover {
+          background: rgba(211, 47, 47, 0.12);
+          color: var(--error-color, #d32f2f);
+          border-color: var(--error-color, #d32f2f);
+        }
+        .tail-card {
+          margin-top: 16px;
+          padding-top: 16px;
+          border-top: 1px solid var(--divider-color, #e0e0e0);
+        }
+        .tail-card h2 {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 8px;
+        }
+        .tail-paused-hint {
+          font-size: 11px;
+          font-weight: 400;
+          letter-spacing: 0;
+          text-transform: none;
+          color: var(--warning-color, #ff9800);
+        }
+        .tail-box {
+          background: var(--code-editor-background-color, #1e1e1e);
+          color: var(--code-editor-text-color, #ddd);
+          font-family: var(--code-font-family, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+          font-size: 11px;
+          line-height: 1.4;
+          padding: 10px 12px;
+          border-radius: 4px;
+          height: clamp(220px, 40vh, 480px);
+          overflow: auto;
+          white-space: pre;
+          margin: 0;
+          word-break: normal;
+        }
+        .tail-box.empty {
+          color: var(--secondary-text-color);
+          font-style: italic;
+          font-family: inherit;
+          font-size: 13px;
+          white-space: normal;
         }
         .checkbox-row {
           display: flex;
@@ -747,17 +977,16 @@ class ZhaDebugCapturePanel extends HTMLElement {
           <div class="col">
             <h2>${t.sessionHeading}</h2>
             ${this._renderSession()}
-            ${isActive ? "" : `
+            ${isActive ? this._renderTail() : `
               <div class="form">
                 <h2>${t.formHeading}</h2>
                 <div class="row">
                   <label for="endtime-input">${t.formEndTime}</label>
                   <input
-                    type="time"
+                    type="datetime-local"
                     id="endtime-input"
-                    value="${timeInputValue(this._endTime)}"
+                    value="${dateTimeInputValue(this._endTime)}"
                   />
-                  <span class="help">(${helpText})</span>
                 </div>
                 <div class="row">
                   <label for="flush-input">${t.formFlushInterval}</label>
@@ -788,6 +1017,8 @@ class ZhaDebugCapturePanel extends HTMLElement {
     `;
 
     this._wireEvents();
+    const list = this.shadowRoot.querySelector(".device-list");
+    if (list && prevScroll) list.scrollTop = prevScroll;
   }
 
   _wireEvents() {
@@ -818,6 +1049,11 @@ class ZhaDebugCapturePanel extends HTMLElement {
       el.onchange = (e) => this._onDeviceToggle(
         e.target.getAttribute("data-device-id"),
         e.target.checked,
+      );
+    });
+    root.querySelectorAll(".capture-delete[data-filename]").forEach((btn) => {
+      btn.onclick = () => this._onDeleteCapture(
+        btn.getAttribute("data-filename"),
       );
     });
   }

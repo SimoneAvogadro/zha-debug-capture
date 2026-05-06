@@ -28,27 +28,35 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 
 from .capture import (
+    delete_capture_file,
     list_capture_files,
     session_status,
     start_capture,
     stop_capture,
+    tail_session,
 )
 from .const import (
     ATTR_DEVICES,
     ATTR_END_TIME,
+    ATTR_FILENAME,
     ATTR_FLUSH_INTERVAL_MINUTES,
+    ATTR_LINES,
     ATTR_REPLACE_EXISTING,
     CAPTURE_DIR_NAME,
     DEFAULT_FLUSH_INTERVAL_MINUTES,
     DEFAULT_SHOW_IN_SIDEBAR,
+    DEFAULT_TAIL_LINES,
     DOMAIN,
+    MAX_TAIL_LINES,
     OPTION_SHOW_IN_SIDEBAR,
     PANEL_ELEMENT_NAME,
     PANEL_URL_PATH,
+    SERVICE_DELETE_CAPTURE,
     SERVICE_LIST_CAPTURES,
     SERVICE_START,
     SERVICE_STATUS,
     SERVICE_STOP,
+    SERVICE_TAIL,
     URL_BASE,
     VERSION,
 )
@@ -70,6 +78,16 @@ START_SCHEMA = vol.Schema(
 )
 
 EMPTY_SCHEMA = vol.Schema({})
+
+TAIL_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_LINES, default=DEFAULT_TAIL_LINES): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=MAX_TAIL_LINES)
+        ),
+    }
+)
+
+DELETE_SCHEMA = vol.Schema({vol.Required(ATTR_FILENAME): cv.string})
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -120,7 +138,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Panel may not have been registered (e.g. show_in_sidebar=False).
         pass
 
-    for svc in (SERVICE_START, SERVICE_STOP, SERVICE_STATUS, SERVICE_LIST_CAPTURES):
+    for svc in (
+        SERVICE_START,
+        SERVICE_STOP,
+        SERVICE_STATUS,
+        SERVICE_LIST_CAPTURES,
+        SERVICE_TAIL,
+        SERVICE_DELETE_CAPTURE,
+    ):
         hass.services.async_remove(DOMAIN, svc)
 
     hass.data.pop(DOMAIN, None)
@@ -217,6 +242,19 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _handle_list_captures(_call: ServiceCall) -> dict[str, Any]:
         return {"files": list_capture_files(hass)}
 
+    async def _handle_tail(call: ServiceCall) -> dict[str, Any]:
+        return await tail_session(
+            hass, int(call.data.get(ATTR_LINES, DEFAULT_TAIL_LINES))
+        )
+
+    async def _handle_delete_capture(call: ServiceCall) -> None:
+        try:
+            await delete_capture_file(hass, call.data[ATTR_FILENAME])
+        except (ValueError, OSError) as err:
+            from homeassistant.exceptions import HomeAssistantError
+
+            raise HomeAssistantError(str(err)) from err
+
     hass.services.async_register(
         DOMAIN, SERVICE_START, _handle_start, schema=START_SCHEMA
     )
@@ -236,4 +274,17 @@ def _async_register_services(hass: HomeAssistant) -> None:
         _handle_list_captures,
         schema=EMPTY_SCHEMA,
         supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TAIL,
+        _handle_tail,
+        schema=TAIL_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DELETE_CAPTURE,
+        _handle_delete_capture,
+        schema=DELETE_SCHEMA,
     )
