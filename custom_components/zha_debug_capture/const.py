@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "zha_debug_capture"
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 URL_BASE = f"/{DOMAIN}"
 PANEL_URL_PATH = DOMAIN.replace("_", "-")
@@ -42,20 +42,14 @@ DEFAULT_BUFFER_MAX_BYTES = 50 * 1024 * 1024
 NOTIFICATION_ID = f"{DOMAIN}_session"
 
 CAPTURE_LOGGERS: tuple[str, ...] = (
-    "zigpy",
     "zigpy.zcl",
     "zigpy.application",
     "zigpy.zdo",
-    "bellows",
-    "bellows.ezsp",
     "bellows.zigbee.application",
-    "zigpy_znp",
     "zigpy_znp.zigbee.application",
-    "zigpy_deconz",
     "zigpy_deconz.zigbee.application",
-    "zigpy_xbee",
     "zigpy_xbee.zigbee.application",
     "homeassistant.components.zha",
 )
 
-LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(zha_device)s] %(name)s: %(message)s"

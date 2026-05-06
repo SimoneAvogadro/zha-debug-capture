@@ -1,8 +1,18 @@
 """Core capture logic: filter, handler, session lifecycle.
 
-Filtering happens at the *logger* level (not just on our in-memory handler),
-so that during a capture session even ``home-assistant.log`` only receives
-records of the selected devices — keeping the main log file clean.
+Filtering happens on the in-memory handler. A logger filter would only run
+for records that originate from that exact logger — Python's logging
+machinery does not re-evaluate a logger's filters when a record propagates
+up from a child logger, so wire-level chatter from children like
+``bellows.ash`` would slip through. With the filter on the handler instead,
+every record that reaches the handler (originated or propagated) is
+checked, which is what we want.
+
+We do *not* try to keep ``home-assistant.log`` clean by other means. In a
+standard HA setup the root handler is at INFO/WARNING, so the DEBUG records
+we collect never reach it anyway. Users who have explicitly raised their
+root handler to DEBUG will see ZHA debug output during a capture session;
+that is their choice.
 
 The buffer lives in RAM and is flushed to disk only on:
     - periodic timer (default every 4h)
@@ -47,37 +57,46 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class IeeeFilter(logging.Filter):
-    """Pass only log records that mention one of the target IEEE/NWK strings.
+    """Pass only log records that mention one of the target IEEE/NWK strings,
+    and annotate the record with the matching device's friendly name(s).
 
-    Matching is case-insensitive substring on the formatted message. We add
-    multiple variants per device (with/without colons for the IEEE, plus the
-    NWK in ``0xABCD`` form) because different zigpy/bellows loggers print
-    addresses in different formats.
+    The map keys are case-insensitive substrings (IEEE with and without
+    colons, NWK in ``0xABCD`` form) — different zigpy/bellows loggers print
+    addresses in different formats. The values are friendly device names
+    used to populate ``record.zha_device`` for the formatter.
     """
 
-    def __init__(self, needles: set[str]) -> None:
+    def __init__(self, needle_map: dict[str, str]) -> None:
         super().__init__()
         self._lock = threading.Lock()
-        self._needles: set[str] = {n.lower() for n in needles if n}
+        self._needle_map: dict[str, str] = {
+            n.lower(): name for n, name in needle_map.items() if n
+        }
 
-    def update_needles(self, needles: set[str]) -> None:
+    def update_needles(self, needle_map: dict[str, str]) -> None:
         with self._lock:
-            self._needles = {n.lower() for n in needles if n}
+            self._needle_map = {
+                n.lower(): name for n, name in needle_map.items() if n
+            }
 
-    def get_needles(self) -> set[str]:
+    def get_needle_map(self) -> dict[str, str]:
         with self._lock:
-            return set(self._needles)
+            return dict(self._needle_map)
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage().lower()
         except Exception:
             return False
+        matched: list[str] = []
         with self._lock:
-            for needle in self._needles:
-                if needle in msg:
-                    return True
-        return False
+            for needle, name in self._needle_map.items():
+                if needle in msg and name not in matched:
+                    matched.append(name)
+        if not matched:
+            return False
+        record.zha_device = ", ".join(matched)
+        return True
 
 
 class MemoryBufferHandler(logging.Handler):
@@ -154,14 +173,22 @@ class ZhaCaptureSession:
     device_names: list[str] = field(default_factory=list)
 
 
-def _build_needles(device_proxies: list[Any]) -> set[str]:
-    """All match strings (IEEE colon/no-colon, NWK 0xABCD) for the filter."""
-    needles: set[str] = set()
+def _build_needle_map(device_proxies: list[Any]) -> dict[str, str]:
+    """Map every match string (IEEE colon/no-colon, NWK 0xABCD) to the
+    friendly name of the device it identifies. Used both to filter records
+    and to label them in the output via ``record.zha_device``.
+
+    Note: the NWK form ``0xABCD`` (4 hex chars) can in principle collide
+    with substrings inside byte dumps or sequence numbers; today we accept
+    that risk in exchange for picking up records that quote only the NWK.
+    """
+    needle_map: dict[str, str] = {}
     for proxy in device_proxies:
         device = proxy.device
+        name = _device_display_name(proxy)
         ieee_str = str(device.ieee).lower()
-        needles.add(ieee_str)
-        needles.add(ieee_str.replace(":", ""))
+        needle_map[ieee_str] = name
+        needle_map[ieee_str.replace(":", "")] = name
         nwk = getattr(device, "nwk", None)
         if nwk is not None:
             try:
@@ -169,8 +196,8 @@ def _build_needles(device_proxies: list[Any]) -> set[str]:
             except (TypeError, ValueError):
                 pass
             else:
-                needles.add(f"0x{nwk_int:04x}")
-    return needles
+                needle_map[f"0x{nwk_int:04x}"] = name
+    return needle_map
 
 
 async def _resolve_devices(
@@ -235,7 +262,7 @@ async def start_capture(
         proxies = await _resolve_devices(hass, device_ids)
         ieees = [str(p.device.ieee).lower() for p in proxies]
         names = [_device_display_name(p) for p in proxies]
-        needles = _build_needles(proxies)
+        needle_map = _build_needle_map(proxies)
 
         now = dt_util.utcnow()
         if end_time.tzinfo is None:
@@ -251,17 +278,23 @@ async def start_capture(
         timestamp = dt_util.now().strftime("%Y%m%d_%H%M%S")
         file_path = capture_dir / f"zha_{timestamp}.log"
 
-        log_filter = IeeeFilter(needles)
+        log_filter = IeeeFilter(needle_map)
         handler = MemoryBufferHandler(file_path)
-        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        # defaults={"zha_device": "-"} guards the formatter against any record
+        # that might reach the handler without going through IeeeFilter (which
+        # always sets the attribute). Cannot happen with the current wiring,
+        # but it keeps Formatter exceptions out of the logging path forever.
+        handler.setFormatter(
+            logging.Formatter(LOG_FORMAT, defaults={"zha_device": "-"})
+        )
         handler.setLevel(logging.DEBUG)
+        handler.addFilter(log_filter)
 
         original_levels: dict[str, int] = {}
         for logger_name in CAPTURE_LOGGERS:
             logger = logging.getLogger(logger_name)
             original_levels[logger_name] = logger.level
             logger.setLevel(logging.DEBUG)
-            logger.addFilter(log_filter)
             logger.addHandler(handler)
 
         flush_interval_s = max(60, int(flush_interval_minutes) * 60)
@@ -289,9 +322,9 @@ async def start_capture(
                 _LOGGER.error("Periodic flush failed: %s", err)
             try:
                 fresh_proxies = await _resolve_devices(hass, session.device_ids)
-                fresh_needles = _build_needles(fresh_proxies)
-                if fresh_needles != log_filter.get_needles():
-                    log_filter.update_needles(fresh_needles)
+                fresh_needle_map = _build_needle_map(fresh_proxies)
+                if fresh_needle_map != log_filter.get_needle_map():
+                    log_filter.update_needles(fresh_needle_map)
                     _LOGGER.debug(
                         "Refreshed filter needles after rejoin check"
                     )
@@ -368,10 +401,6 @@ async def _stop_capture_locked(
 
     for logger_name, original_level in session.original_levels.items():
         logger = logging.getLogger(logger_name)
-        try:
-            logger.removeFilter(session.log_filter)
-        except Exception:
-            pass
         try:
             logger.removeHandler(session.handler)
         except Exception:
