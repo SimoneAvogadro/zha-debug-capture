@@ -400,11 +400,20 @@ class ZhaDebugCapturePanel extends HTMLElement {
       box.textContent = this._t.tailEmpty;
       return;
     }
-    const wasNearBottom =
-      box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    // Decide whether to auto-follow BEFORE swapping content. A 100px window
+    // keeps follow active even after very fast streams, while still dropping
+    // out if the user has clearly scrolled up to inspect older lines.
+    const nearBottom =
+      box.scrollHeight - box.scrollTop - box.clientHeight < 100;
     box.classList.remove("empty");
     box.textContent = lines.join("\n");
-    if (wasNearBottom) box.scrollTop = box.scrollHeight;
+    if (nearBottom) {
+      // Wait one frame so layout has applied — otherwise scrollHeight is the
+      // stale pre-update value and we end up parked above the new tail.
+      requestAnimationFrame(() => {
+        box.scrollTop = box.scrollHeight;
+      });
+    }
     // Keep the buffer-size indicator in the session card fresh too.
     const bufEl = this.shadowRoot.querySelector(".session-buffer");
     if (bufEl && this._session) {
@@ -939,6 +948,26 @@ class ZhaDebugCapturePanel extends HTMLElement {
           white-space: pre;
           margin: 0;
           word-break: normal;
+          /* Firefox: force a visible thin scrollbar (HA themes sometimes hide
+             it globally, and Shadow DOM does not always isolate that). */
+          scrollbar-width: thin;
+          scrollbar-color: var(--scrollbar-thumb-color, #888) transparent;
+        }
+        /* WebKit/Blink: same goal. Without this the scrollbar is auto-hide
+           on macOS/iOS and not always rendered inside Shadow DOM. */
+        .tail-box::-webkit-scrollbar {
+          width: 10px;
+          height: 10px;
+        }
+        .tail-box::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .tail-box::-webkit-scrollbar-thumb {
+          background: var(--scrollbar-thumb-color, #888);
+          border-radius: 5px;
+        }
+        .tail-box::-webkit-scrollbar-thumb:hover {
+          background: var(--scrollbar-thumb-hover-color, #aaa);
         }
         .tail-box.empty {
           color: var(--secondary-text-color);
