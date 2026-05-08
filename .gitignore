@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local capture output (development)
+log/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

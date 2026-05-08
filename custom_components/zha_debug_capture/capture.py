@@ -173,7 +173,11 @@ class ZhaCaptureSession:
     device_names: list[str] = field(default_factory=list)
 
 
-def _build_needle_map(device_proxies: list[Any]) -> dict[str, str]:
+def _build_needle_map(
+    hass: HomeAssistant,
+    device_ids: list[str],
+    device_proxies: list[Any],
+) -> dict[str, str]:
     """Map every match string (IEEE colon/no-colon, NWK 0xABCD) to the
     friendly name of the device it identifies. Used both to filter records
     and to label them in the output via ``record.zha_device``.
@@ -183,9 +187,9 @@ def _build_needle_map(device_proxies: list[Any]) -> dict[str, str]:
     that risk in exchange for picking up records that quote only the NWK.
     """
     needle_map: dict[str, str] = {}
-    for proxy in device_proxies:
+    for device_id, proxy in zip(device_ids, device_proxies):
         device = proxy.device
-        name = _device_display_name(proxy)
+        name = _device_display_name(hass, device_id, proxy)
         ieee_str = str(device.ieee).lower()
         needle_map[ieee_str] = name
         needle_map[ieee_str.replace(":", "")] = name
@@ -223,7 +227,29 @@ async def _resolve_devices(
     return proxies
 
 
-def _device_display_name(proxy: Any) -> str:
+def _device_display_name(
+    hass: HomeAssistant, device_id: str, proxy: Any
+) -> str:
+    """Pick the most user-meaningful label for a device.
+
+    Prefers HA's device registry (the user-set ``name_by_user``, then the
+    auto-detected ``name``) so the log line carries the same label the user
+    sees in the panel and in HA's UI. Falls back to zigpy's ``device.name``
+    (manufacturer + model) and finally the IEEE.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    try:
+        dev_reg = dr.async_get(hass)
+        entry = dev_reg.async_get(device_id)
+    except Exception:
+        entry = None
+    if entry is not None:
+        if entry.name_by_user:
+            return entry.name_by_user
+        if entry.name:
+            return entry.name
+
     device = proxy.device
     name = getattr(device, "name", None) or getattr(device, "manufacturer", None)
     if not name:
@@ -261,8 +287,11 @@ async def start_capture(
 
         proxies = await _resolve_devices(hass, device_ids)
         ieees = [str(p.device.ieee).lower() for p in proxies]
-        names = [_device_display_name(p) for p in proxies]
-        needle_map = _build_needle_map(proxies)
+        names = [
+            _device_display_name(hass, did, p)
+            for did, p in zip(device_ids, proxies)
+        ]
+        needle_map = _build_needle_map(hass, device_ids, proxies)
 
         now = dt_util.utcnow()
         if end_time.tzinfo is None:
@@ -322,7 +351,9 @@ async def start_capture(
                 _LOGGER.error("Periodic flush failed: %s", err)
             try:
                 fresh_proxies = await _resolve_devices(hass, session.device_ids)
-                fresh_needle_map = _build_needle_map(fresh_proxies)
+                fresh_needle_map = _build_needle_map(
+                    hass, session.device_ids, fresh_proxies
+                )
                 if fresh_needle_map != log_filter.get_needle_map():
                     log_filter.update_needles(fresh_needle_map)
                     _LOGGER.debug(
