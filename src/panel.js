@@ -7,6 +7,7 @@ const I18N = {
   it: {
     title: "ZHA Debug Capture",
     refresh: "Aggiorna",
+    menu: "Apri menù",
     sessionHeading: "Sessione",
     sessionActive: "● attiva",
     sessionInactive: "○ nessuna sessione attiva",
@@ -42,6 +43,7 @@ const I18N = {
   en: {
     title: "ZHA Debug Capture",
     refresh: "Refresh",
+    menu: "Open menu",
     sessionHeading: "Session",
     sessionActive: "● active",
     sessionInactive: "○ no active session",
@@ -507,6 +509,15 @@ class ZhaDebugCapturePanel extends HTMLElement {
     this._render();
   }
 
+  _toggleMenu() {
+    // Narrow viewports hide HA's sidebar; this event asks the root
+    // <home-assistant> element to toggle it so the user isn't stuck.
+    this.dispatchEvent(new CustomEvent("hass-toggle-menu", {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   _onDeviceToggle(deviceId, checked) {
     if (checked) this._selected.add(deviceId);
     else this._selected.delete(deviceId);
@@ -682,6 +693,25 @@ class ZhaDebugCapturePanel extends HTMLElement {
           padding: 12px 20px;
           z-index: 5;
           box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header-left {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+        .icon-btn {
+          background: transparent;
+          color: inherit;
+          border: none;
+          padding: 4px;
+          margin: -4px;
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          border-radius: 50%;
+        }
+        .icon-btn:hover {
+          background: rgba(255,255,255,0.12);
         }
         .header h1 {
           margin: 0;
@@ -981,7 +1011,12 @@ class ZhaDebugCapturePanel extends HTMLElement {
         }
       </style>
       <div class="header">
-        <h1>${t.title}</h1>
+        <div class="header-left">
+          ${this._narrow ? `<button id="menu-btn" class="icon-btn" title="${t.menu}" aria-label="${t.menu}">
+            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2Z"/></svg>
+          </button>` : ""}
+          <h1>${t.title}</h1>
+        </div>
         <button id="refresh-btn">${t.refresh}</button>
       </div>
       <div class="body">
@@ -1048,6 +1083,8 @@ class ZhaDebugCapturePanel extends HTMLElement {
 
   _wireEvents() {
     const root = this.shadowRoot;
+    const menu = root.getElementById("menu-btn");
+    if (menu) menu.onclick = () => this._toggleMenu();
     const refresh = root.getElementById("refresh-btn");
     if (refresh) refresh.onclick = () => this._onRefreshClick();
     const stop = root.getElementById("stop-btn");
