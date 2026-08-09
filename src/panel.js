@@ -146,10 +146,38 @@ function isAndroidCompanion() {
   return !!(window.externalApp || window.externalAppV2);
 }
 
+// Hands the app the file contents together with the name we want it saved
+// under, over the external bus. This is the same "handleBlob" message the app
+// sends itself when it picks up a blob: download — except that path names the
+// file from URLUtil.guessFileName(blobUrl), which yields <uuid>.bin because a
+// blob: URL carries no name. Passing the filename explicitly is the only way
+// to keep the capture name the panel shows.
+function sendBlobToCompanion(dataUri, filename) {
+  const payload = { type: "handleBlob", data: dataUri, filename };
+  if (window.externalAppV2) {
+    window.externalAppV2.postMessage(
+      JSON.stringify({ type: "externalBus", payload }),
+    );
+  } else {
+    window.externalApp.externalBus(JSON.stringify(payload));
+  }
+}
+
+function blobToDataUri(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.onloadend = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
+}
+
 // The companion app reads the blob asynchronously after the click, so the URL
 // must stay alive for a while — same delay the HA frontend uses.
 const BLOB_REVOKE_DELAY_MS = 10000;
 
+// Fallback for when the external bus is unusable: the app still saves the
+// file, just under a generated name.
 function triggerBlobDownload(blob, filename) {
   const href = URL.createObjectURL(blob);
   const el = document.createElement("a");
@@ -512,7 +540,12 @@ class ZhaDebugCapturePanel extends HTMLElement {
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
       }
-      triggerBlobDownload(await resp.blob(), filename);
+      const blob = await resp.blob();
+      try {
+        sendBlobToCompanion(await blobToDataUri(blob), filename);
+      } catch (bridgeErr) {
+        triggerBlobDownload(blob, filename);
+      }
     } catch (err) {
       this._error = this._t.errorDownload.replace(
         "{error}",
