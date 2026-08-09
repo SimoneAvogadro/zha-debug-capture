@@ -42,6 +42,7 @@ const I18N = {
     errorNoDevices: "Seleziona almeno un device.",
     errorNoEndTime: "Imposta un orario di fine valido nel futuro.",
     errorEndTimeTooFar: "La fine cattura non può essere oltre 7 giorni da adesso.",
+    errorDownload: "Download non riuscito: {error}",
     confirmStop: "Fermare la sessione di cattura attiva?",
   },
   en: {
@@ -78,6 +79,7 @@ const I18N = {
     errorNoDevices: "Select at least one device.",
     errorNoEndTime: "Set a valid end time in the future.",
     errorEndTimeTooFar: "Capture end can't be more than 7 days from now.",
+    errorDownload: "Download failed: {error}",
     confirmStop: "Stop the active capture session?",
   },
 };
@@ -135,6 +137,33 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// The Home Assistant Android companion app hands plain http(s) download links
+// to the system DownloadManager, which runs outside the app and therefore has
+// neither the WebView session nor its TLS client certificate. On instances that
+// require mTLS (or use a private CA) every such download fails with a bare
+// "download failed" notification. Fetching the file inside the WebView and
+// handing the app a blob: URL instead keeps the whole transfer on the
+// connection that is already authenticated.
+function isAndroidCompanion() {
+  return !!(window.externalApp || window.externalAppV2);
+}
+
+// The companion app reads the blob asynchronously after the click, so the URL
+// must stay alive for a while — same delay the HA frontend uses.
+const BLOB_REVOKE_DELAY_MS = 10000;
+
+function triggerBlobDownload(blob, filename) {
+  const href = URL.createObjectURL(blob);
+  const el = document.createElement("a");
+  el.href = href;
+  el.download = filename;
+  el.style.display = "none";
+  document.body.appendChild(el);
+  el.dispatchEvent(new MouseEvent("click"));
+  document.body.removeChild(el);
+  setTimeout(() => URL.revokeObjectURL(href), BLOB_REVOKE_DELAY_MS);
 }
 
 function dateTimeInputValue(date) {
@@ -473,6 +502,32 @@ class ZhaDebugCapturePanel extends HTMLElement {
     }
   }
 
+  async _onCaptureLinkClick(event, link) {
+    // Outside the Android app the plain link works and streams straight to
+    // disk, which is cheaper for large captures — leave it alone.
+    if (!isAndroidCompanion()) return;
+    event.preventDefault();
+    const filename = link.getAttribute("data-filename");
+    this._busy = true;
+    this._error = "";
+    this._render();
+    try {
+      const resp = await fetch(link.href);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      triggerBlobDownload(await resp.blob(), filename);
+    } catch (err) {
+      this._error = this._t.errorDownload.replace(
+        "{error}",
+        String(err && err.message ? err.message : err),
+      );
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
   async _onDeleteCapture(filename) {
     if (!filename) return;
     const msg = this._t.confirmDelete.replace("{file}", filename);
@@ -650,7 +705,12 @@ class ZhaDebugCapturePanel extends HTMLElement {
       const safeName = escapeHtml(c.filename);
       return `
         <div class="capture">
-          <a href="${url}" download class="capture-link">
+          <a
+            href="${url}"
+            download
+            class="capture-link"
+            data-filename="${safeName}"
+          >
             <code>${safeName}</code>
           </a>
           <span class="capture-right">
@@ -1116,6 +1176,9 @@ class ZhaDebugCapturePanel extends HTMLElement {
         e.target.getAttribute("data-device-id"),
         e.target.checked,
       );
+    });
+    root.querySelectorAll(".capture-link[data-filename]").forEach((link) => {
+      link.onclick = (e) => this._onCaptureLinkClick(e, link);
     });
     root.querySelectorAll(".capture-delete[data-filename]").forEach((btn) => {
       btn.onclick = () => this._onDeleteCapture(
