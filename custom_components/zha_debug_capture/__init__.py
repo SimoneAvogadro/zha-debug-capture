@@ -240,7 +240,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         return session_status(hass)
 
     async def _handle_list_captures(_call: ServiceCall) -> dict[str, Any]:
-        return {"files": list_capture_files(hass)}
+        # glob + stat hit the disk: keep them off the event loop.
+        files = await hass.async_add_executor_job(list_capture_files, hass)
+        return {"files": files}
 
     async def _handle_tail(call: ServiceCall) -> dict[str, Any]:
         return await tail_session(

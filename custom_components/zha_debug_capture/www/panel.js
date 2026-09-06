@@ -1221,4 +1221,9 @@ class ZhaDebugCapturePanel extends HTMLElement {
   }
 }
 
-customElements.define("zha-debug-capture-panel", ZhaDebugCapturePanel);
+// The module URL carries a ?v= cache-buster, so after an integration update
+// the frontend can evaluate this file a second time in the same page while
+// the previous definition is still registered. Redefining throws.
+if (!customElements.get("zha-debug-capture-panel")) {
+  customElements.define("zha-debug-capture-panel", ZhaDebugCapturePanel);
+}
