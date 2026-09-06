@@ -19,9 +19,10 @@ behaviour — without the SD-card wear of running `zigpy: debug` continuously.
 - **Sidebar panel** — `ZHA Debug` shows up in HA's left menu (admin-only).
   Lists every ZHA device with checkbox selection, a search filter, and a
   time-of-day picker for when the capture should auto-stop.
-- **Filter at the logger level** — also `home-assistant.log` stays clean
-  during a capture session: only records mentioning the IEEE/NWK of the
-  selected devices are emitted.
+- **`home-assistant.log` stays clean** — during a session the ZHA loggers
+  run at DEBUG, but a gate filter on HA's root log handler drops those
+  DEBUG records from the main log; only the capture file receives them,
+  and only for the selected devices. Warnings and errors flow as usual.
 - **In-memory buffer** — flushed every 4h by default (configurable per
   session). Final flush on stop, on shutdown, or when the buffer reaches
   50 MB.

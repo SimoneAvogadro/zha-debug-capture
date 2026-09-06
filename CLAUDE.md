@@ -10,9 +10,11 @@ flushes lazily to disk. The motivation is SD-card wear on Raspberry Pi
 deployments — running `zigpy: debug` continuously is too noisy. See
 `README.md` for the user-facing story.
 
-There is no Python test suite, no linter config, no package manager. The
-Python code runs inside Home Assistant; the JS frontend is hand-written
-ES2020+ with no bundler.
+There is no linter config and no package manager. The only unit tests are
+`tests/test_log_gate.py` (stdlib `unittest`, no HA needed — run
+`python3 -m unittest discover -s tests`); they cover `log_gate.py`, which is
+kept stdlib-only for that reason. Everything else runs inside Home
+Assistant; the JS frontend is hand-written ES2020+ with no bundler.
 
 ## Build / deploy
 
@@ -32,8 +34,8 @@ To test changes against a running HA: copy
 directory and restart HA (or reload the integration entry from
 Settings → Devices & Services).
 
-There is no automated test runner. Verification means installing into HA and
-exercising the panel + the four services manually.
+Beyond the `log_gate` unit tests, verification means installing into HA and
+exercising the panel + the services manually.
 
 ## Architecture
 
@@ -46,14 +48,26 @@ exercising the panel + the four services manually.
 2. Builds a set of "needles" per device — IEEE (with and without colons) and
    NWK in `0xABCD` form — because different zigpy/bellows loggers print
    addresses in different formats.
-3. Attaches an `IeeeFilter` (substring match on the formatted message) **and**
-   a `MemoryBufferHandler` to every logger in `CAPTURE_LOGGERS`
-   (`const.py:36`). The filter is added at the *logger* level, not just to
-   our handler — this keeps the main `home-assistant.log` clean during a
-   session, since records that don't match any selected device are dropped
-   before any handler sees them.
-4. Bumps each touched logger to `DEBUG`, remembering its prior level so it
-   can be restored on stop.
+3. Attaches a `MemoryBufferHandler`, carrying an `IeeeFilter` (substring
+   match on the formatted message), to every logger in `CAPTURE_LOGGERS`
+   (`const.py`). The filter lives on the *handler*, not the logger: Python
+   only runs a logger's own filters for records that originate there, so a
+   logger-level filter would let records propagated up from child loggers
+   through unchecked.
+4. Bumps each touched logger to `DEBUG` via `log_gate.raise_loggers_to_debug`,
+   remembering both its own level (to restore on stop) and its *effective*
+   level (see next step). Loggers whose `setLevel` is a no-op — HA's
+   `logger` integration installs a `Logger` subclass that ignores
+   `setLevel` for names the user overrode in `logger:` — are reported as
+   `blocked_loggers` in the session/status and in the notification.
+5. Installs a `LevelGateFilter` on HA's root handlers for the session's
+   lifetime. Propagation never checks ancestor logger levels and HA's root
+   `HomeAssistantQueueHandler` has no level of its own, so without this
+   every DEBUG record we unlock would also land in `home-assistant.log`.
+   The gate drops records from the raised loggers (and children) below
+   their pre-session effective level, nothing else. `HomeAssistantQueueHandler.handle()`
+   runs handler filters explicitly, so this is a supported hook. Removed on
+   stop *after* the levels are restored.
 
 `MemoryBufferHandler` accumulates lines in a `list[str]` guarded by a
 `threading.Lock` (logging callsites can be on any thread). Flush to disk

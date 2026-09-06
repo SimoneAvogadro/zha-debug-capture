@@ -8,11 +8,13 @@ up from a child logger, so wire-level chatter from children like
 every record that reaches the handler (originated or propagated) is
 checked, which is what we want.
 
-We do *not* try to keep ``home-assistant.log`` clean by other means. In a
-standard HA setup the root handler is at INFO/WARNING, so the DEBUG records
-we collect never reach it anyway. Users who have explicitly raised their
-root handler to DEBUG will see ZHA debug output during a capture session;
-that is their choice.
+Raising a logger to DEBUG also sends its DEBUG records up to HA's root
+handler (and thus ``home-assistant.log``): propagation never checks the
+ancestors' levels, and HA's root handler has none. To keep the main log as
+it was before the session, a ``LevelGateFilter`` (see ``log_gate.py``) is
+installed on the root handlers for the session's lifetime. It drops records
+from the raised loggers that are below their pre-session effective level
+and lets everything else through untouched.
 
 The buffer lives in RAM and is flushed to disk only on:
     - periodic timer (default every 4h)
@@ -51,6 +53,13 @@ from .const import (
     MIN_DURATION_SECONDS,
     NOTIFICATION_ID,
     TAIL_FILE_BYTES,
+)
+from .log_gate import (
+    LevelGateFilter,
+    install_root_gate,
+    raise_loggers_to_debug,
+    remove_root_gate,
+    snapshot_levels,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -171,6 +180,9 @@ class ZhaCaptureSession:
     flush_unsub: Any | None = None
     stop_unsub: Any | None = None
     device_names: list[str] = field(default_factory=list)
+    root_gate: LevelGateFilter | None = None
+    root_handlers: list[logging.Handler] = field(default_factory=list)
+    blocked_loggers: list[str] = field(default_factory=list)
 
 
 def _build_needle_map(
@@ -319,14 +331,26 @@ async def start_capture(
         handler.setLevel(logging.DEBUG)
         handler.addFilter(log_filter)
 
-        original_levels: dict[str, int] = {}
-        for logger_name in CAPTURE_LOGGERS:
-            logger = logging.getLogger(logger_name)
-            original_levels[logger_name] = logger.level
-            logger.setLevel(logging.DEBUG)
-            logger.addHandler(handler)
-
         flush_interval_s = max(60, int(flush_interval_minutes) * 60)
+
+        # Logging side effects come last, after every input has been
+        # validated: from here on nothing should raise before the session
+        # is registered, or the root gate would be left installed.
+        # Gate the root handlers *before* raising any logger, so no DEBUG
+        # record slips into home-assistant.log in between.
+        snapshot = snapshot_levels(CAPTURE_LOGGERS)
+        root_gate = LevelGateFilter(snapshot.thresholds)
+        root_handlers = install_root_gate(root_gate)
+        raised = raise_loggers_to_debug(CAPTURE_LOGGERS, snapshot)
+        for logger_name in CAPTURE_LOGGERS:
+            logging.getLogger(logger_name).addHandler(handler)
+        original_levels = raised.original_levels
+        if raised.blocked:
+            _LOGGER.warning(
+                "These loggers are overridden in HA's 'logger' integration "
+                "and refused DEBUG; the capture will not include them: %s",
+                ", ".join(raised.blocked),
+            )
 
         session = ZhaCaptureSession(
             device_ids=list(device_ids),
@@ -339,6 +363,9 @@ async def start_capture(
             expires_at=expires_at,
             flush_interval_minutes=int(flush_interval_minutes),
             device_names=names,
+            root_gate=root_gate,
+            root_handlers=root_handlers,
+            blocked_loggers=list(raised.blocked),
         )
 
         async def _periodic_flush(_now: Any) -> None:
@@ -441,6 +468,13 @@ async def _stop_capture_locked(
         except Exception:
             pass
 
+    # Only after the levels are back: until then DEBUG records could still
+    # be generated and must keep being dropped from the main log.
+    if session.root_gate is not None:
+        remove_root_gate(session.root_gate, session.root_handlers)
+        session.root_gate = None
+        session.root_handlers = []
+
     try:
         await hass.async_add_executor_job(session.handler.flush_to_disk)
     except Exception as err:
@@ -474,6 +508,13 @@ def _update_notification(
             f"Scade alle {local_expires.strftime('%H:%M')}.\n"
             f"File: `{session.file_path}`"
         )
+        if session.blocked_loggers:
+            msg += (
+                "\n\n⚠️ Questi logger sono forzati nella configurazione "
+                "`logger:` di HA e non sono stati portati a DEBUG; "
+                "la cattura non li includerà: "
+                + ", ".join(f"`{n}`" for n in session.blocked_loggers)
+            )
         title = "ZHA Debug Capture — attiva"
     else:
         size = (
@@ -507,6 +548,7 @@ def session_status(hass: HomeAssistant) -> dict[str, Any]:
         "buffered_bytes": session.handler.buffered_bytes,
         "file_path": str(session.file_path),
         "flush_interval_minutes": session.flush_interval_minutes,
+        "blocked_loggers": list(session.blocked_loggers),
     }
 
 

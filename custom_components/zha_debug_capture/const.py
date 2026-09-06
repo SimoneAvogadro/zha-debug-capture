@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "zha_debug_capture"
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 URL_BASE = f"/{DOMAIN}"
 PANEL_URL_PATH = DOMAIN.replace("_", "-")
